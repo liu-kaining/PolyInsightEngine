@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0a0a0a;
+  --border: rgba(30, 41, 59, 0.5);
+  --emerald: #34d399;
+  --rose: #f43f5e;
+}
+
+body {
+  background-color: var(--bg);
+  color: #e2e8f0;
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+.font-mono {
+  font-family: "Roboto Mono", ui-monospace, monospace;
+}
