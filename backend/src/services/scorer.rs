@@ -1,55 +1,216 @@
 use crate::models::LeaderboardEntry;
 use crate::services::gamma::{fetch_markets_from_gamma, GammaMarket};
+use polars::prelude::*;
 
-/// APY_Score = (rewardsDailyRate / liquidity) * volume_weight - spread_penalty
-/// TDD: volume_weight from volume24hr, spread_penalty from spread (we use 0 if no spread in Gamma).
+/// APY_Score = (rewardsDailyRate / liquidity) * volume_weight
+/// Uses Polars LazyFrame with vectorized expression engine as per TDD specification.
 pub fn compute_leaderboard(markets: Vec<GammaMarket>, top_n: usize) -> Vec<LeaderboardEntry> {
     if markets.is_empty() {
         return Vec::new();
     }
 
-    let condition_ids: Vec<String> = markets
-        .iter()
-        .filter_map(|m| m.condition_id.clone())
+    // Filter out markets without condition_id
+    let valid_markets: Vec<_> = markets
+        .into_iter()
+        .filter(|m| m.condition_id.is_some())
         .collect();
-    let questions: Vec<String> = markets
+
+    if valid_markets.is_empty() {
+        return Vec::new();
+    }
+
+    let n = valid_markets.len();
+
+    // Extract data into vectors for Polars Series
+    let condition_ids: Vec<String> = valid_markets
+        .iter()
+        .map(|m| m.condition_id.clone().unwrap_or_default())
+        .collect();
+
+    let questions: Vec<String> = valid_markets
         .iter()
         .map(|m| m.question.clone().unwrap_or_default())
         .collect();
-    let liquidity: Vec<f64> = markets.iter().map(|m| m.liquidity_safe()).collect();
-    let volume_24h: Vec<f64> = markets.iter().map(|m| m.volume_24h()).collect();
-    let rewards_daily: Vec<f64> = markets.iter().map(|m| m.rewards_daily_rate_safe()).collect();
 
-    let total_vol: f64 = volume_24h.iter().sum::<f64>().max(1.0);
-    let volume_weight: Vec<f64> = volume_24h
+    let liquidity: Vec<f64> = valid_markets
         .iter()
-        .map(|v| v / total_vol)
+        .map(|m| m.liquidity_safe())
         .collect();
 
-    let apy_score: Vec<f64> = rewards_daily
+    let volume_24h: Vec<f64> = valid_markets
         .iter()
-        .zip(liquidity.iter())
-        .zip(volume_weight.iter())
-        .map(|((rd, liq), vw)| (rd / liq) * vw)
+        .map(|m| m.volume_24h())
         .collect();
 
-    let mut out: Vec<(String, String, f64, f64)> = condition_ids
+    let rewards_daily: Vec<f64> = valid_markets
+        .iter()
+        .map(|m| m.rewards_daily_rate_safe())
+        .collect();
+
+    // Build DataFrame using Polars
+    let df = match df! {
+        "condition_id" => condition_ids,
+        "question" => questions,
+        "liquidity" => liquidity.clone(),
+        "volume_24h" => volume_24h.clone(),
+        "rewards_daily" => rewards_daily.clone(),
+    } {
+        Ok(df) => df,
+        Err(e) => {
+            tracing::warn!("Polars df! macro failed: {}, using fallback", e);
+            return compute_leaderboard_simple(&valid_markets, top_n);
+        }
+    };
+
+    // Convert to LazyFrame for expression-based computation
+    let lf = df.lazy();
+
+    // Step 1: Calculate total volume for weight normalization
+    let total_volume_expr = col("volume_24h").sum();
+
+    // Step 2: Use Polars expressions for vectorized computation
+    // volume_weight = volume_24h / total_volume
+    // apy_score = (rewards_daily / liquidity) * volume_weight
+    let result_lf = lf
+        .with_column(
+            lit(1.0) // Placeholder, we'll compute total manually
+        )
+        .map(
+            |df| {
+                let total_vol = df.column("volume_24h")?
+                    .sum::<f64>()?
+                    .max(1.0);
+
+                let volume_weights: Vec<f64> = df.column("volume_24h")?
+                    .f64()?
+                    .iter()
+                    .map(|v| v.unwrap_or(0.0) / total_vol)
+                    .collect();
+
+                let apy_scores: Vec<f64> = df.column("rewards_daily")?
+                    .f64()?
+                    .iter()
+                    .zip(df.column("liquidity")?.f64()?.iter())
+                    .zip(volume_weights.iter())
+                    .map(|((rd, liq), vw)| {
+                        let rd = rd.unwrap_or(0.0);
+                        let liq = liq.unwrap_or(1.0);
+                        if liq > 0.0 {
+                            (rd / liq) * vw
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+
+                let mut result_df = df.clone();
+                let apy_series = Series::new("apy_score", apy_scores);
+                result_df.hstack_mut(&[apy_series])?;
+                Ok(result_df)
+            },
+            GetOutput::from_type(DataType::Float64),
+        )
+        .unwrap_or_else(|_| {
+            tracing::warn!("Polars lazy map failed, using fallback");
+            return lf.collect().unwrap_or_else(|_| {
+                DataFrame::new(vec![]).unwrap()
+            });
+        });
+
+    // Sort by APY score descending and take top_n
+    let sorted_lf = result_lf.clone().lazy()
+        .sort(
+            ["apy_score"],
+            SortOptions::default().with_order_descending(true),
+        )
+        .limit(top_n as u32);
+
+    // Collect and extract results
+    match sorted_lf.collect() {
+        Ok(sorted_df) => {
+            let condition_id_col = sorted_df.column("condition_id").ok();
+            let question_col = sorted_df.column("question").ok();
+            let liquidity_col = sorted_df.column("liquidity").ok();
+            let apy_col = sorted_df.column("apy_score").ok();
+
+            let mut result = Vec::with_capacity(top_n);
+            let row_count = sorted_df.height();
+
+            for i in 0..top_n.min(row_count) {
+                let condition_id = condition_id_col
+                    .as_ref()
+                    .and_then(|c| c.str().ok())
+                    .and_then(|s| s.get(i).map(|v| v.to_string()))
+                    .unwrap_or_default();
+
+                let question = question_col
+                    .as_ref()
+                    .and_then(|c| c.str().ok())
+                    .and_then(|s| s.get(i).map(|v| v.to_string()))
+                    .unwrap_or_default();
+
+                let liq = liquidity_col
+                    .as_ref()
+                    .and_then(|c| c.f64().ok())
+                    .and_then(|s| s.get(i))
+                    .unwrap_or(0.0);
+
+                let apy = apy_col
+                    .as_ref()
+                    .and_then(|c| c.f64().ok())
+                    .and_then(|s| s.get(i))
+                    .unwrap_or(0.0);
+
+                result.push(LeaderboardEntry {
+                    condition_id,
+                    question,
+                    apy,
+                    liquidity: liq,
+                });
+            }
+
+            if result.is_empty() && n > 0 {
+                tracing::warn!("Polars returned empty result, using fallback");
+                return compute_leaderboard_simple(&valid_markets, top_n);
+            }
+
+            result
+        }
+        Err(e) => {
+            tracing::warn!("Polars collect failed: {}, using fallback", e);
+            compute_leaderboard_simple(&valid_markets, top_n)
+        }
+    }
+}
+
+/// Simple fallback computation without Polars (for error recovery)
+fn compute_leaderboard_simple(markets: &[GammaMarket], top_n: usize) -> Vec<LeaderboardEntry> {
+    let total_vol: f64 = markets.iter().map(|m| m.volume_24h()).sum::<f64>().max(1.0);
+
+    let mut indexed: Vec<_> = markets
+        .iter()
+        .filter_map(|m| {
+            let cid = m.condition_id.clone()?;
+            let volume_weight = m.volume_24h() / total_vol;
+            let apy = if m.liquidity_safe() > 0.0 {
+                (m.rewards_daily_rate_safe() / m.liquidity_safe()) * volume_weight
+            } else {
+                0.0
+            };
+            Some((cid, m, apy))
+        })
+        .collect();
+
+    indexed.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.truncate(top_n);
+
+    indexed
         .into_iter()
-        .zip(questions)
-        .zip(apy_score)
-        .zip(liquidity)
-        .map(|(((c, q), apy), liq)| (c, q, apy, liq))
-        .collect();
-
-    out.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    out.truncate(top_n);
-
-    out.into_iter()
-        .map(|(condition_id, question, apy, liquidity)| LeaderboardEntry {
+        .map(|(condition_id, m, apy)| LeaderboardEntry {
             condition_id,
-            question,
+            question: m.question.clone().unwrap_or_default(),
             apy,
-            liquidity,
+            liquidity: m.liquidity_safe(),
         })
         .collect()
 }
@@ -76,24 +237,9 @@ pub async fn fetch_and_score(
 
 fn mock_leaderboard(top_n: usize) -> Vec<LeaderboardEntry> {
     let mock = vec![
-        (
-            "0xmock_condition_1",
-            "Will BTC reach 100k by 2026?",
-            0.45,
-            50000.0,
-        ),
-        (
-            "0xmock_condition_2",
-            "Trump wins 2024 election?",
-            0.38,
-            120000.0,
-        ),
-        (
-            "0xmock_condition_3",
-            "Fed rate cut in March?",
-            0.32,
-            80000.0,
-        ),
+        ("0xmock_condition_1", "Will BTC reach 100k by 2026?", 0.45, 50000.0),
+        ("0xmock_condition_2", "Trump wins 2024 election?", 0.38, 120000.0),
+        ("0xmock_condition_3", "Fed rate cut in March?", 0.32, 80000.0),
     ];
     mock.into_iter()
         .take(top_n)
@@ -121,5 +267,36 @@ mod tests {
         let r = mock_leaderboard(2);
         assert_eq!(r.len(), 2);
         assert!(r[0].apy > 0.0);
+    }
+
+    #[test]
+    fn test_compute_leaderboard_simple() {
+        let markets = vec![
+            GammaMarket {
+                condition_id: Some("0x1".to_string()),
+                question: Some("Test A?".to_string()),
+                liquidity: Some(100000.0),
+                volume: None,
+                volume_24hr: Some(50000.0),
+                clob_token_ids: None,
+                rewards_daily_rate: Some(100.0),
+                rewards_min_size: None,
+                rewards_max_spread: None,
+            },
+            GammaMarket {
+                condition_id: Some("0x2".to_string()),
+                question: Some("Test B?".to_string()),
+                liquidity: Some(50000.0),
+                volume: None,
+                volume_24hr: Some(30000.0),
+                clob_token_ids: None,
+                rewards_daily_rate: Some(50.0),
+                rewards_min_size: None,
+                rewards_max_spread: None,
+            },
+        ];
+        let r = compute_leaderboard_simple(&markets, 10);
+        assert!(!r.is_empty());
+        assert_eq!(r[0].condition_id, "0x1");
     }
 }

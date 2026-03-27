@@ -59,6 +59,11 @@ impl RestOracleAdapter {
         }
     }
 
+    /// Create with a pre-configured HTTP client (for connection pooling)
+    pub fn new_with_client(base_url: String, client: reqwest::Client) -> Self {
+        Self { base_url, client }
+    }
+
     /// Fetch BTC price from Binance-style /ticker/price?symbol=BTCUSDT.
     pub async fn fetch_btc_price(&self) -> Result<f64, anyhow::Error> {
         let url = format!("{}/ticker/price", self.base_url.trim_end_matches('/'));
@@ -68,6 +73,9 @@ impl RestOracleAdapter {
             .query(&[("symbol", "BTCUSDT")])
             .send()
             .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Binance API returned status: {}", resp.status());
+        }
         let ticker: BinanceTicker = resp.json().await?;
         let price: f64 = ticker.last_price.parse()?;
         Ok(price)

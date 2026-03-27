@@ -13,6 +13,16 @@ pub struct AiSignalRow {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(clickhouse::Row, serde::Serialize, serde::Deserialize)]
+pub struct MarketSnapshotRow {
+    pub condition_id: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub yes_price: f64,
+    pub no_price: f64,
+    pub liquidity: f64,
+    pub volume_24h: f64,
+}
+
 pub fn connect(url: &str) -> anyhow::Result<ClickHousePool> {
     let client = Client::default().with_url(url);
     Ok(Arc::new(client))
@@ -109,14 +119,44 @@ pub async fn insert_ai_signal(
     Ok(())
 }
 
-#[derive(clickhouse::Row, serde::Deserialize)]
-pub struct MarketSnapshotRow {
-    pub condition_id: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub yes_price: f64,
-    pub no_price: f64,
-    pub liquidity: f64,
-    pub volume_24h: f64,
+/// Insert a single market snapshot into ClickHouse.
+pub async fn insert_market_snapshot(
+    client: &Client,
+    condition_id: &str,
+    yes_price: f64,
+    no_price: f64,
+    liquidity: f64,
+    volume_24h: f64,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now();
+    let row = MarketSnapshotRow {
+        condition_id: condition_id.to_string(),
+        timestamp: now,
+        yes_price,
+        no_price,
+        liquidity,
+        volume_24h,
+    };
+    let mut insert = client.insert("market_snapshots")?;
+    insert.write(&row).await?;
+    insert.end().await?;
+    Ok(())
+}
+
+/// Batch insert multiple market snapshots.
+pub async fn insert_market_snapshots_batch(
+    client: &Client,
+    snapshots: Vec<MarketSnapshotRow>,
+) -> anyhow::Result<()> {
+    if snapshots.is_empty() {
+        return Ok(());
+    }
+    let mut insert = client.insert("market_snapshots")?;
+    for row in snapshots {
+        insert.write(&row).await?;
+    }
+    insert.end().await?;
+    Ok(())
 }
 
 pub async fn fetch_market_history(
@@ -144,6 +184,88 @@ pub async fn fetch_recent_ai_signals(
     let rows = client
         .query(&sql)
         .fetch_all::<AiSignalRow>()
+        .await?;
+    Ok(rows)
+}
+
+/// Row structure for smart_money_trades table
+#[derive(clickhouse::Row, serde::Serialize, serde::Deserialize)]
+pub struct SmartMoneyTradeRow {
+    pub tx_hash: String,
+    pub wallet_address: String,
+    pub condition_id: String,
+    pub side: String,
+    pub price: f64,
+    pub size: f64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Insert a single smart money trade into ClickHouse.
+pub async fn insert_smart_money_trade(
+    client: &Client,
+    tx_hash: &str,
+    wallet_address: &str,
+    condition_id: &str,
+    side: &str,
+    price: f64,
+    size: f64,
+    timestamp: u64,
+) -> anyhow::Result<()> {
+    // Safely convert Unix timestamp to DateTime, fallback to current time if invalid
+    let ts = chrono::DateTime::from_timestamp(timestamp as i64, 0)
+        .filter(|t| t.timestamp() > 0 && t.timestamp() < 4102444800) // Sanity check: between 1970 and 2100
+        .unwrap_or_else(chrono::Utc::now);
+
+    let row = SmartMoneyTradeRow {
+        tx_hash: tx_hash.to_string(),
+        wallet_address: wallet_address.to_string(),
+        condition_id: condition_id.to_string(),
+        side: side.to_string(),
+        price,
+        size,
+        timestamp: ts,
+    };
+
+    let mut insert = client.insert("smart_money_trades")?;
+    insert.write(&row).await?;
+    insert.end().await?;
+    Ok(())
+}
+
+/// Batch insert multiple smart money trades.
+pub async fn insert_smart_money_trades_batch(
+    client: &Client,
+    trades: Vec<SmartMoneyTradeRow>,
+) -> anyhow::Result<()> {
+    if trades.is_empty() {
+        return Ok(());
+    }
+    let mut insert = client.insert("smart_money_trades")?;
+    for row in trades {
+        insert.write(&row).await?;
+    }
+    insert.end().await?;
+    Ok(())
+}
+
+/// Fetch recent smart money trades for a specific market condition.
+pub async fn fetch_smart_money_trades(
+    client: &Client,
+    condition_id: &str,
+    limit: u32,
+) -> anyhow::Result<Vec<SmartMoneyTradeRow>> {
+    let sql = format!(
+        "SELECT tx_hash, wallet_address, condition_id, side, price, size, timestamp \
+         FROM smart_money_trades \
+         WHERE condition_id = ? \
+         ORDER BY timestamp DESC \
+         LIMIT {}",
+        limit
+    );
+    let rows = client
+        .query(&sql)
+        .bind(condition_id)
+        .fetch_all::<SmartMoneyTradeRow>()
         .await?;
     Ok(rows)
 }

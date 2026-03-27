@@ -26,3 +26,13 @@ pub struct SignalSummary {
     pub reasoning: String,
     pub timestamp: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartMoneyTrade {
+    pub tx_hash: String,
+    pub wallet_address: String,
+    pub side: String,
+    pub price: f64,
+    pub size: f64,
+    pub timestamp: String,
+}

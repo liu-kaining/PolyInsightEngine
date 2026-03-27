@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio_stream::StreamExt;
 
 use crate::db;
-use crate::models::{LeaderboardEntry, MarketHistoryPoint, SignalSummary};
+use crate::models::{LeaderboardEntry, MarketHistoryPoint, SignalSummary, SmartMoneyTrade};
 use crate::services::{scorer, signals};
 use crate::AppState;
 
@@ -27,6 +27,7 @@ fn api_v1() -> Router<Arc<AppState>> {
     Router::new()
         .route("/markets/leaderboard", get(leaderboard))
         .route("/markets/:condition_id/history", get(market_history))
+        .route("/markets/:condition_id/smart-money", get(market_smart_money))
         .route("/signals/latest", get(signals_latest))
         .route("/signals/generate", post(signals_generate))
         .route("/stream/markets", get(stream_markets))
@@ -138,6 +139,31 @@ async fn signals_latest(State(state): State<Arc<AppState>>) -> Json<Vec<SignalSu
             })
             .collect(),
         Err(_) => Vec::new(),
+    };
+    Json(list)
+}
+
+async fn market_smart_money(
+    State(state): State<Arc<AppState>>,
+    Path(condition_id): Path<String>,
+) -> Json<Vec<SmartMoneyTrade>> {
+    const LIMIT: u32 = 50;
+    let list = match db::clickhouse::fetch_smart_money_trades(&state.clickhouse, &condition_id, LIMIT).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| SmartMoneyTrade {
+                tx_hash: r.tx_hash,
+                wallet_address: r.wallet_address,
+                side: r.side,
+                price: r.price,
+                size: r.size,
+                timestamp: r.timestamp.to_rfc3339(),
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!("smart_money: failed to fetch trades for {}: {}", condition_id, e);
+            Vec::new()
+        }
     };
     Json(list)
 }
