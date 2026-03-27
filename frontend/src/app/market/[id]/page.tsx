@@ -7,6 +7,8 @@ import { fetchMarketHistory, fetchSmartMoneyTrades } from "@/lib/api";
 import type { MarketHistoryPoint, SmartMoneyTrade } from "@/lib/api";
 import ReactECharts from "echarts-for-react";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080";
+
 // Types for lightweight-charts
 interface ChartInstance {
   remove: () => void;
@@ -22,13 +24,13 @@ export default function MarketPage() {
   const params = useParams();
   const id = typeof params.id === "string" ? params.id : "";
   const { data: history = [] } = useSWR<MarketHistoryPoint[]>(
-    id ? ["market-history", id] : null,
+    id ? ["market-history", id, API_BASE] : null,
     () => fetchMarketHistory(id, "24h"),
     { refreshInterval: 60000 }
   );
 
   const { data: smartMoneyTrades = [] } = useSWR<SmartMoneyTrade[]>(
-    id ? ["smart-money", id] : null,
+    id ? ["smart-money", id, API_BASE] : null,
     () => fetchSmartMoneyTrades(id),
     { refreshInterval: 60000 }
   );

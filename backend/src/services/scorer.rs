@@ -65,60 +65,21 @@ pub fn compute_leaderboard(markets: Vec<GammaMarket>, top_n: usize) -> Vec<Leade
     // Convert to LazyFrame for expression-based computation
     let lf = df.lazy();
 
-    // Step 1: Calculate total volume for weight normalization
-    let total_volume_expr = col("volume_24h").sum();
+    // Pure Polars vectorized expression pipeline:
+    // Step 1: total_volume = sum(volume_24h), clamp to 1.0 to avoid div-by-zero
+    // Step 2: volume_weight = volume_24h / total_volume
+    // Step 3: apy_score = (rewards_daily / liquidity) * volume_weight
+    let total_vol: f64 = volume_24h.iter().sum::<f64>().max(1.0);
 
-    // Step 2: Use Polars expressions for vectorized computation
-    // volume_weight = volume_24h / total_volume
-    // apy_score = (rewards_daily / liquidity) * volume_weight
-    let result_lf = lf
+    let sorted_lf = lf
         .with_column(
-            lit(1.0) // Placeholder, we'll compute total manually
+            (col("volume_24h") / lit(total_vol)).alias("volume_weight")
         )
-        .map(
-            |df| {
-                let total_vol = df.column("volume_24h")?
-                    .sum::<f64>()?
-                    .max(1.0);
-
-                let volume_weights: Vec<f64> = df.column("volume_24h")?
-                    .f64()?
-                    .iter()
-                    .map(|v| v.unwrap_or(0.0) / total_vol)
-                    .collect();
-
-                let apy_scores: Vec<f64> = df.column("rewards_daily")?
-                    .f64()?
-                    .iter()
-                    .zip(df.column("liquidity")?.f64()?.iter())
-                    .zip(volume_weights.iter())
-                    .map(|((rd, liq), vw)| {
-                        let rd = rd.unwrap_or(0.0);
-                        let liq = liq.unwrap_or(1.0);
-                        if liq > 0.0 {
-                            (rd / liq) * vw
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-
-                let mut result_df = df.clone();
-                let apy_series = Series::new("apy_score", apy_scores);
-                result_df.hstack_mut(&[apy_series])?;
-                Ok(result_df)
-            },
-            GetOutput::from_type(DataType::Float64),
+        .with_column(
+            ((col("rewards_daily") / col("liquidity")) * col("volume_weight"))
+                .fill_literal(lit(0.0)) // guard against div-by-zero
+                .alias("apy_score")
         )
-        .unwrap_or_else(|_| {
-            tracing::warn!("Polars lazy map failed, using fallback");
-            return lf.collect().unwrap_or_else(|_| {
-                DataFrame::new(vec![]).unwrap()
-            });
-        });
-
-    // Sort by APY score descending and take top_n
-    let sorted_lf = result_lf.clone().lazy()
         .sort(
             ["apy_score"],
             SortOptions::default().with_order_descending(true),
