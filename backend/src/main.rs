@@ -223,8 +223,9 @@ async fn auto_signal_generator_loop(state: Arc<AppState>) {
 /// Background task: track smart money / whale trades from Polymarket Subgraph.
 /// Runs every 60 seconds, filters trades above $10k threshold, and persists to ClickHouse.
 async fn smart_money_tracker_loop(clickhouse: db::clickhouse::ClickHousePool) {
-    use crate::db::clickhouse::insert_smart_money_trade;
+    use crate::db::clickhouse::{insert_smart_money_trades_batch, SmartMoneyTradeRow};
     use crate::services::smart_money::{fetch_latest_whale_trades, WHALE_TRADE_THRESHOLD};
+    use chrono::Utc;
 
     const INTERVAL_SECS: u64 = 60; // 1 minute
 
@@ -240,56 +241,42 @@ async fn smart_money_tracker_loop(clickhouse: db::clickhouse::ClickHousePool) {
             }
         };
 
-        // Step 2: Filter whale trades (above threshold)
-        let whale_trades: Vec<_> = trades
-            .iter()
+        // Step 2: Filter whale trades (above threshold) and convert to rows
+        let now = Utc::now();
+        let rows: Vec<SmartMoneyTradeRow> = trades
+            .into_iter()
             .filter(|t| t.size >= WHALE_TRADE_THRESHOLD)
+            .map(|t| {
+                // Safely convert timestamp with sanity check
+                let ts = chrono::DateTime::from_timestamp(t.timestamp as i64, 0)
+                    .filter(|dt| dt.timestamp() > 0 && dt.timestamp() < 4102444800)
+                    .unwrap_or(now);
+                SmartMoneyTradeRow {
+                    tx_hash: t.tx_hash,
+                    wallet_address: t.wallet_address,
+                    condition_id: t.condition_id,
+                    side: t.side,
+                    price: t.price,
+                    size: t.size,
+                    timestamp: ts,
+                }
+            })
             .collect();
 
-        if whale_trades.is_empty() {
+        if rows.is_empty() {
             tracing::debug!("smart_money: no whale trades detected");
             continue;
         }
 
-        // Step 3: Persist to ClickHouse
-        let mut inserted = 0usize;
-        for trade in whale_trades {
-            match insert_smart_money_trade(
-                &clickhouse,
-                &trade.tx_hash,
-                &trade.wallet_address,
-                &trade.condition_id,
-                &trade.side,
-                trade.price,
-                trade.size,
-                trade.timestamp,
-            )
-            .await
-            {
-                Ok(_) => {
-                    inserted += 1;
-                    tracing::info!(
-                        "Whale trade tracked: {} bought ${:.0} of {} ({})",
-                        &trade.wallet_address[..10],
-                        trade.size,
-                        &trade.condition_id[..10],
-                        trade.side
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "smart_money: failed to insert trade {}: {}",
-                        &trade.tx_hash[..8],
-                        e
-                    );
-                }
+        // Step 3: Batch persist to ClickHouse
+        match insert_smart_money_trades_batch(&clickhouse, rows).await {
+            Ok(_) => {
+                tracing::info!("smart_money: tracked {} whale trades this cycle", rows.len());
+            }
+            Err(e) => {
+                tracing::warn!("smart_money: failed to batch insert trades: {}", e);
             }
         }
-
-        tracing::info!(
-            "smart_money: tracked {} whale trades this cycle",
-            inserted
-        );
     }
 }
 
