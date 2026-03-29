@@ -1,14 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OracleTick {
-    pub source: String,
-    pub symbol: String,
-    pub implied_probability: f64,
-    pub timestamp: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiAlphaSignal {
     pub condition_id: String,
     pub target_side: String,

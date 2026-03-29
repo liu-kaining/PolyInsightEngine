@@ -76,13 +76,15 @@ pub fn compute_leaderboard(markets: Vec<GammaMarket>, top_n: usize) -> Vec<Leade
             (col("volume_24h") / lit(total_vol)).alias("volume_weight")
         )
         .with_column(
-            ((col("rewards_daily") / col("liquidity")) * col("volume_weight"))
-                .fill_literal(lit(0.0)) // guard against div-by-zero
-                .alias("apy_score")
+            (when(col("liquidity").eq(lit(0.0)))
+                .then(lit(0.0))
+                .otherwise(col("rewards_daily") / col("liquidity"))
+                * col("volume_weight"))
+            .alias("apy_score"),
         )
         .sort(
             ["apy_score"],
-            SortOptions::default().with_order_descending(true),
+            SortMultipleOptions::default().with_order_descending(true),
         )
         .limit(top_n as u32);
 
@@ -240,6 +242,8 @@ mod tests {
                 volume: None,
                 volume_24hr: Some(50000.0),
                 clob_token_ids: None,
+                outcomes: None,
+                outcome_prices: None,
                 rewards_daily_rate: Some(100.0),
                 rewards_min_size: None,
                 rewards_max_spread: None,
@@ -251,6 +255,8 @@ mod tests {
                 volume: None,
                 volume_24hr: Some(30000.0),
                 clob_token_ids: None,
+                outcomes: None,
+                outcome_prices: None,
                 rewards_daily_rate: Some(50.0),
                 rewards_min_size: None,
                 rewards_max_spread: None,

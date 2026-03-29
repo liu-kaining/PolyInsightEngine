@@ -31,6 +31,7 @@ pub fn connect(url: &str) -> anyhow::Result<ClickHousePool> {
 pub async fn ping(client: &Client) -> anyhow::Result<()> {
     #[derive(clickhouse::Row, serde::Deserialize)]
     struct OneRow {
+        #[allow(dead_code)]
         one: u8,
     }
     let _: OneRow = client
@@ -120,6 +121,7 @@ pub async fn insert_ai_signal(
 }
 
 /// Insert a single market snapshot into ClickHouse.
+#[allow(dead_code)]
 pub async fn insert_market_snapshot(
     client: &Client,
     condition_id: &str,
@@ -201,6 +203,7 @@ pub struct SmartMoneyTradeRow {
 }
 
 /// Insert a single smart money trade into ClickHouse.
+#[allow(dead_code)]
 pub async fn insert_smart_money_trade(
     client: &Client,
     tx_hash: &str,

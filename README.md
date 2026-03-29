@@ -65,6 +65,8 @@ Copy `.env.example` to `.env` and adjust:
 | `REDIS_URL` | Redis connection URL |
 | `CLICKHOUSE_URL` | ClickHouse HTTP URL |
 | `GAMMA_API_BASE` | Polymarket Gamma API base (default `https://gamma-api.polymarket.com`) |
+| `CLOB_API_BASE` | Polymarket CLOB API base for order-book midpoint / last-trade prices (default `https://clob.polymarket.com`) |
+| `POLYMARKET_SUBGRAPH_URL` | The Graph–hosted (or Goldsky / self-hosted) Polymarket subgraph HTTP endpoint; used to ingest on-chain large trades for the Smart Money tracker |
 | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | Optional; omit to use mock LLM responses |
 | `NEXT_PUBLIC_API_BASE` | Frontend: backend base URL (e.g. `http://localhost:8080`) |
 
@@ -77,6 +79,7 @@ Copy `.env.example` to `.env` and adjust:
 | GET | `/health` | Liveness |
 | GET | `/api/v1/markets/leaderboard` | Top markets by APY (JSON) |
 | GET | `/api/v1/markets/:condition_id/history?range=24h` | Market history (JSON) |
+| GET | `/api/v1/markets/:condition_id/smart-money` | 巨鲸 / 聪明钱历史交易记录 (JSON) |
 | GET | `/api/v1/signals/latest` | Latest AI signals (JSON) |
 | POST | `/api/v1/signals/generate` | Generate and persist one signal (body: `condition_id`, optional `context`) |
 | GET | `/api/v1/stream/markets` | SSE stream of leaderboard snapshots |
